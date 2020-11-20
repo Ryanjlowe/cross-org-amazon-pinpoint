@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  AWSOrgId:
+    Type: String
+    Description: AWS Organization ID
+
+Resources:
+
+  #### Centralized Reporting S3 Bucket
+  ReportingS3:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: Not public facing.
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: pinpoint-event-processing/
+
+  ReportingS3Policy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportingS3
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: AllowSSLRequestsOnly
+          Effect: Deny
+          Principal: "*"
+          Action: "s3:*"
+          Resource:
+            - !Sub "arn:aws:s3:::${ReportingS3}/*"
+            - !Sub "arn:aws:s3:::${ReportingS3}"
+          Condition:
+            Bool:
+              "aws:SecureTransport": "false"
+        -
+          Effect: "Allow"
+          Principal: "*"
+          Action:
+            - "s3:AbortMultipartUpload"
+            - "s3:GetBucketLocation"
+            - "s3:GetObject"
+            - "s3:ListBucket"
+            - "s3:ListBucketMultipartUploads"
+            - "s3:PutObject"
+          Resource:
+            - !Sub "arn:aws:s3:::${ReportingS3}/*"
+            - !Sub "arn:aws:s3:::${ReportingS3}"
+          Condition:
+            ArnEquals:
+              aws:PrincipalOrgID: !Ref AWSOrgId
+
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: This is the log bucket.
+    Properties:
+      AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: AWSCloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: "s3:GetBucketAcl"
+          Resource: !Sub arn:aws:s3:::${LogBucket}
+        - Sid: AWSCloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: "s3:PutObject"
+          Resource: !Sub arn:aws:s3:::${LogBucket}/AWSLogs/${AWS::AccountId}/*
+          Condition:
+            StringEquals:
+              "s3:x-amz-acl": "bucket-owner-full-control"
+        - Sid: LogBucketAllowSSLRequestsOnly
+          Effect: Deny
+          Principal: "*"
+          Action: "s3:*"
+          Resource:
+            - !Sub "arn:aws:s3:::${LogBucket}/*"
+            - !Sub "arn:aws:s3:::${LogBucket}"
+          Condition:
+            Bool:
+              "aws:SecureTransport": "false"
+
+  #### Custom Channel
+  CustomChannelSQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 100
+
+  CustomChannelSQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref CustomChannelSQSQueue
+      PolicyDocument:
+        Id: "PublishFromOrg"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal: "*"
+            Action:
+              - "sqs:SendMessage"
+            Resource: !Ref CustomChannelSQSQueue
+            Condition:
+              ArnEquals:
+                aws:PrincipalOrgID: !Ref AWSOrgId
+
+  PrimaryOrgCustomChannelLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt PrimaryOrgCustomChannelLambdaFunctionRole.Arn
+      Runtime: "python3.7"
+      Timeout: 60
+      MemorySize: 1024
+      # Environment:
+      #   Variables:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+
+          def lambda_handler(event, context):
+
+              logging.getLogger().setLevel('INFO')
+              # print the payload the Lambda was invoked with
+              logging.info(event)
+
+              # TODO - implement the custom channel

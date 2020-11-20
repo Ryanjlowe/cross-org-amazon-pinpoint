@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  PrimarySQSArn:
+    Type: String
+    Description: ARN of the SQS Queue in the Primary Account
+  PrimarySQSURL:
+    Type: String
+    Description: URL of the SQS Queue in the Primary Account
+  PrimaryS3BucketArn:
+    Type: String
+    Description: ARN of the S3 Reporting Bucket in the Primary Account
+
+
+
+Resources:
+
+  PinpointAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - mobiletargeting:*
+                Resource: !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/*"
+
+
+  ##### Pinpoint Event Stream Kinesis Reporting
+  PinpointEventFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: "DirectPut"
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !Ref PrimaryS3BucketArn
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 128
+        CompressionFormat: "UNCOMPRESSED"
+        Prefix: "events/"
+        ErrorOutputPrefix: "errors/"
+        RoleARN: !GetAtt PinpointKinesisFirehoseRole.Arn
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pinpoint-eventstream-firehose"
+          LogStreamName: "S3DeliveryErrors"
+
+  KinesisFirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pinpoint-eventstream-firehose"
+
+  KinesisFirehoseLogStreamName:
+    Type: AWS::Logs::LogStream
+    DependsOn: KinesisFirehoseLogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pinpoint-eventstream-firehose"
+      LogStreamName: "S3DeliveryErrors"
+
+  PinpointKinesisStreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pinpoint.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "firehose:PutRecordBatch"
+                  - "firehose:DescribeDeliveryStream"
+                Resource: !GetAtt PinpointEventFirehose.Arn
+
+  PinpointKinesisFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - firehose.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${PrimaryS3BucketArn}/*"
+                  - !Ref PrimaryS3BucketArn
+              -
+                Effect: "Allow"
+                Action: "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*:log-stream:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+
+
+  ##### CUSTOM CHANNELS
+
+  CustomChannelLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt CrossAccountCustomChannelLambdaFunction.Arn
+      Principal: !Sub 'pinpoint.${AWS::Region}.amazonaws.com'
+      SourceArn: !Sub 'arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:/apps/*'
+
+
+  CrossAccountCustomChannelLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt CrossAccountCustomChannelLambdaFunctionRole.Arn
+      Runtime: "python3.7"
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref PrimarySQSURL
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+
+          client = boto3.client('sqs')
+          queue_url = os.environ['SQS_QUEUE_URL']
+
+          def lambda_handler(event, context):
+
+              logging.getLogger().setLevel('INFO')
+              # print the payload the Lambda was invoked with
+              logging.info(event)
+              logging.info(queue_url)
+
+              try:
+                response = sqs.send_message(
+                  QueueUrl=queue_url,
+                  MessageBody=json.dumps(event),
+                )
+              except Exception as e:
+                logging.error(e)
+                logging.error("Error trying to enqueue the connect message to SQS")
+
+              logging.info("Complete")
+              return "Complete"
+
+  CrossAccountCustomChannelLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              -
+                Effect: "Allow"
+                Action:
+                  - "sqs:SendMessage"
+                Resource: !Ref PrimarySQSArn
+
+
+Outputs:
+  PinpointAccountRoleArn:
+    Description: ARN of the Role that can access Pinpoint in this Sub Account
+    Value: !GetAtt PinpointAccountRole.Arn

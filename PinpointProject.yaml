@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  PinpointProjectName:
+    Type: String
+    Default: "My Pinpoint Project"
+    Description: "If no PinpointProjectId provided, name to be used to create the Pinpoint project"
+  PinpointEventFirehoseArn:
+    Type: String
+    Description: ARN of the Firehose in the Sub AWS Account
+  PinpointKinesisStreamRoleArn:
+    Type: String
+    Description: ARN of the Firehose Role in the Sub AWS Account
+
+Resources:
+  # Creates the Pinpoint Project
+  PinpointProject:
+    Type: AWS::Pinpoint::App
+    DeletionPolicy: Retain
+    Properties:
+      Name: !Ref PinpointProjectName
+
+  # Configures the Pinpoint Project's Event Stream to use the Sub Account's Firehose
+  PinpointEventStream:
+    Type: AWS::Pinpoint::EventStream
+    Properties:
+      ApplicationId: !Ref PinpointProject
+      DestinationStreamArn: !Ref PinpointEventFirehoseArn
+      RoleArn: !Ref PinpointKinesisStreamRoleArn
+
+Outputs:
+  PinpointProjectId:
+    Description: Amazon Pinpoint Project ID that was configured by the solution
+    Value: !Ref PinpointProject
+  PinpointProjectArn:
+    Description: Full AWS Arn of the Amazon Pinpoint Project that was configured by the solution
+    Value: !Sub 'arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${PinpointProject}'
