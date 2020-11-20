@@ -1,5 +1,7 @@
 # Amazon Pinpoint Cross Org Project Setup
 
+Includes the infrastructure, policies, and example code needed to implement sharding Amazon Pinpoint projects across multiple AWS Accounts inside of an AWS Organization.  Useful for scenarios where more than 100 Pinpoint Projects are needed.
+
 ## Architecture Diagram
 
 ![Arch](arch.png)
